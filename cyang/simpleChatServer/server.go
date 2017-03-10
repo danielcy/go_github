@@ -45,7 +45,8 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 		recieveStr := string(buf[0:lenght])
 		head := strings.Split(recieveStr, "|")[0]
 
-		if head == "LI" { //Process Log In message.
+		switch head {
+		case "LI": //Process Log In message.
 			username := strings.Split(recieveStr, "|")[1]
 			password := strings.Split(recieveStr, "|")[2]
 			var exist bool
@@ -62,7 +63,18 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 
 			messages <- returnMsg
 
-		} else if head == "SU" { //Process Sign Up message.
+			offlineMessageSenders := database.GetAllOfflineMessageSender(user, db)
+
+			if len(offlineMessageSenders) != 0 {
+				systemMsg := conn.RemoteAddr().String() + "|SYSTEM|" + offlineMessageSenders[0].Username
+				for i := 1; i < len(offlineMessageSenders); i++ {
+					systemMsg = systemMsg + ", " + offlineMessageSenders[i].Username
+				}
+				systemMsg = systemMsg + " sent you some offline messages. Please remember to check. \n"
+				messages <- systemMsg
+			}
+
+		case "SU": //Process Sign Up message.
 			username := strings.Split(recieveStr, "|")[1]
 			password := strings.Split(recieveStr, "|")[2]
 			exist := CheckUserExistance(username, db)
@@ -77,7 +89,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 			returnMsg := conn.RemoteAddr().String() + "|SUCCESS|" + strconv.Itoa(user.Id)
 			messages <- returnMsg
 
-		} else if head == "AF" { //Process Apply Friend message.
+		case "AF": //Process Apply Friend message.
 			friendname := strings.Split(recieveStr, "|")[1]
 			exist := CheckUserExistance(friendname, db)
 			if exist == false {
@@ -99,7 +111,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 				messages <- sendMsg
 			}
 
-		} else if head == "VRL" { //Process View Request List message.
+		case "VRL": //Process View Request List message.
 			requestFriends := database.GetFriendApplyList(user, db)
 			returnMsg := conn.RemoteAddr().String()
 			size := len(requestFriends)
@@ -107,7 +119,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 				returnMsg = returnMsg + "|" + strconv.Itoa(requestFriends[i].Id) + ";" + requestFriends[i].Username
 			}
 			messages <- returnMsg
-		} else if head == "CR" { //Process Confirm Request message.
+		case "CR": //Process Confirm Request message.
 			friendid, _ := strconv.Atoi(strings.Split(recieveStr, "|")[1])
 			friend := database.GetUserByID(friendid, db)
 			if database.CheckFriendApplyRelationship(friend, user, db) == false {
@@ -123,7 +135,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 				sendMsg := friendAddr + "|SYSTEM|" + user.Username + " has confirmed your friend request."
 				messages <- sendMsg
 			}
-		} else if head == "VFL" { //Process View Friend List message.
+		case "VFL": //Process View Friend List message.
 			friends := database.GetFriendList(user, db)
 			returnMsg := conn.RemoteAddr().String()
 			size := len(friends)
@@ -132,17 +144,37 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 				returnMsg = returnMsg + "|" + strconv.Itoa(friends[i].Id) + ";" + friends[i].Username + ";" + strconv.Itoa(status)
 			}
 			messages <- returnMsg
-		} else if head == "OD" { //Process Open Dialog message.
+		case "OD": //Process Open Dialog message.
 			targetid, _ := strconv.Atoi(strings.Split(recieveStr, "|")[1])
 			target := database.GetUserByID(targetid, db)
 
-			if database.CheckFriendRelationship(target, user, db) == false || database.CheckStatus(target.Username, db) == false {
+			if database.CheckFriendRelationship(target, user, db) == false {
 				SendFailMessage(conn, head)
 				continue
 			}
 			returnMsg := conn.RemoteAddr().String() + "|SUCCESS|" + target.Username
 			messages <- returnMsg
-		} else if head == "CT" { //Process Chat message.
+		case "GOM": //Process Get Offline Message message.
+			targetName := strings.Split(recieveStr, "|")[1]
+			target := database.GetUserByName(targetName, db)
+
+			offlineMessageInfos := database.GetAllOfflineMessage(user, target, db)
+
+			if offlineMessageInfos.Len() == 0 {
+				SendFailMessage(conn, head)
+				continue
+			}
+			sendMsg := conn.RemoteAddr().String()
+			for i := 0; offlineMessageInfos.Len() > 0; i++ {
+				item := offlineMessageInfos.Front()
+				charInfo := item.Value.(*database.ChatInfo)
+				encodedBody := database.Base64Encode(charInfo.Body)
+				sendMsg = sendMsg + "|" + charInfo.Sender + ";" + charInfo.Time + ";" + encodedBody
+				offlineMessageInfos.Remove(item)
+			}
+			database.DeleteOfflineMessage(user, target, db)
+			messages <- sendMsg
+		case "CT": //Process Chat message.
 			targetName := strings.Split(recieveStr, "|")[1]
 			chatBodyTmp := strings.Split(recieveStr, "|")[2:]
 			chatBody := chatBodyTmp[0]
@@ -152,23 +184,25 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 			}
 
 			target := database.GetUserByName(targetName, db)
+			timeTmp := time.Now().Unix()
+			curTime := time.Unix(timeTmp, 0).String()
 
-			if database.CheckStatus(target.Username, db) == false {
-				SendFailMessage(conn, head)
-				continue
-			}
 			returnMsg := conn.RemoteAddr().String() + "|SUCCESS"
 			messages <- returnMsg
 
 			targetAddr := ipnamemap[target.Username]
-			timeTmp := time.Now().Unix()
-			curTime := time.Unix(timeTmp, 0).String()
 			database.SaveChatMessage(user, target, curTime, chatBody, db)
+
+			if database.CheckStatus(target.Username, db) == false {
+				database.SaveOfflineChatMessage(user, target, curTime, chatBody, db)
+				continue
+			}
+
 			if targetAddr != "" {
 				sendMsg := targetAddr + "|CHAT|" + user.Username + "|" + curTime + "|" + chatBody
 				messages <- sendMsg
 			}
-		} else if head == "OHD" { //Process Open History Dialog message.
+		case "OHD": //Process Open History Dialog message.
 			targetid, _ := strconv.Atoi(strings.Split(recieveStr, "|")[1])
 			target := database.GetUserByID(targetid, db)
 
@@ -180,7 +214,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 			messages <- returnMsg
 
 			historyChatMsgs = database.GetAllHistory(user, target, db)
-		} else if head == "VHM" {
+		case "VHM": //Process View History Message message.
 			if historyChatMsgs.Len() == 0 {
 				SendFailMessage(conn, head)
 				continue
@@ -194,7 +228,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 				historyChatMsgs.Remove(item)
 			}
 			messages <- sendMsg
-		} else {
+		default:
 			messages <- recieveStr
 		}
 
@@ -260,6 +294,7 @@ func main() {
 	database.FetchOrCreateFriendTable(db)
 	database.FetchOrCreateFriendApplyTable(db)
 	database.FetchOrCreateChatInfoTable(db)
+	database.FetchOrCreateOfflineChatInfoTable(db)
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	//"log"
 
 	"github.com/cyang/simpleChat/database"
 )

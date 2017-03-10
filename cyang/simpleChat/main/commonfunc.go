@@ -16,7 +16,6 @@ import (
 
 var (
 	recieverMutex *sync.Mutex = new(sync.Mutex)
-	lockSignal    bool        = true
 )
 
 func checkError(err error, info string) (res bool) {
@@ -54,10 +53,10 @@ func StartClient(port string) {
 			return
 		}
 		recieveStr := string(buf[0:lenght])
-		if strings.Split(recieveStr, "|")[1] == "SYSTEM" {
+		if len(strings.Split(recieveStr, "|")) > 1 && strings.Split(recieveStr, "|")[1] == "SYSTEM" {
 			curTime := GetCurrentTime()
 			fmt.Println("[" + curTime + "]" + "[System Message]: " + strings.Split(recieveStr, "|")[2])
-		} else if strings.Split(recieveStr, "|")[1] == "CHAT" {
+		} else if len(strings.Split(recieveStr, "|")) > 1 && strings.Split(recieveStr, "|")[1] == "CHAT" {
 			chatMsg <- recieveStr
 		} else {
 			message <- recieveStr
@@ -305,10 +304,11 @@ func ChatWithFriends(message chan string, user *database.User, chatReciever map[
 }
 
 func Chat(message chan string, user *database.User, target *database.User, chatReciever map[string]*list.List, chatReminder map[string]*string, conn net.Conn) {
-	fmt.Printf("Now you are chatting with %s. Enter '/back' to return to friend list. \n", target.Username)
+	fmt.Printf("Now you are chatting with %s. Enter '/back' to return to friend list. \n \n", target.Username)
 	*chatReminder["currentTarget"] = target.Username
 	signal := make(map[string]*string)
 	signal["kill"] = new(string)
+	GetOfflineMessageFromTarget(message, user, target, conn)
 	go GetChatInfoAndPrint(chatReciever, target, signal)
 	for {
 		inputReader := bufio.NewReader(os.Stdin)
@@ -419,7 +419,7 @@ func SendMessage(head string, str1 string, str2 string, str3 string, conn net.Co
 func RecieveChatInfo(chatMsg chan string, chatReciever map[string]*list.List, chatReminder map[string]*string, conn net.Conn) {
 	for {
 		msg := <-chatMsg
-		lockSignal = true
+		recieverMutex.Lock()
 		// fmt.Printf("[DEBUG][RECIEVE CHAT MESSAGE]: %s \n", msg)
 		senderName := strings.Split(msg, "|")[2]
 
@@ -430,19 +430,16 @@ func RecieveChatInfo(chatMsg chan string, chatReciever map[string]*list.List, ch
 		if *chatReminder["currentTarget"] != senderName {
 			curTime := GetCurrentTime()
 			fmt.Printf("[%s][System Message]: You recieve a message from %s. \n", curTime, senderName)
-		} else if lockSignal == false {
-			recieverMutex.Unlock()
 		}
-		lockSignal = false
+		recieverMutex.Unlock()
+		//fmt.Printf("[LOG]Reading unlocked.")
 	}
 }
 
 func GetChatInfoAndPrint(chatReciever map[string]*list.List, sender *database.User, signal map[string]*string) {
 	for {
-		if lockSignal == true {
-			lockSignal = false
-			recieverMutex.Lock()
-		}
+		recieverMutex.Lock()
+		recieverMutex.Unlock()
 		chatMsgList := chatReciever[sender.Username]
 		if chatMsgList == nil || chatMsgList.Len() == 0 {
 			continue
@@ -465,6 +462,26 @@ func GetChatInfoAndPrint(chatReciever map[string]*list.List, sender *database.Us
 
 		fmt.Printf("[%s][%s]: %s\n", time, senderName, body)
 	}
+}
+
+func GetOfflineMessageFromTarget(message chan string, user *database.User, target *database.User, conn net.Conn) {
+	SendMessage("GOM", target.Username, "", "", conn)
+	returnMsg := <-message
+
+	if strings.Split(returnMsg, "|")[0] == "FAIL" {
+		return
+	}
+
+	offlineMsgs := strings.Split(returnMsg, "|")[1:]
+	for i := 0; i < len(offlineMsgs); i++ {
+		splitInfos := strings.Split(offlineMsgs[i], ";")
+		senderName := splitInfos[0]
+		curTime := splitInfos[1]
+		encodeBody := splitInfos[2]
+		body, _ := database.Base64Decode(encodeBody)
+		fmt.Printf("[%s][%s]: %s\n", curTime, senderName, body)
+	}
+
 }
 
 func GetCurrentTime() string {
