@@ -4,7 +4,9 @@ import (
 	"container/list"
 	"database/sql"
 	"log"
+	"strings"
 
+	"github.com/garyburd/redigo/redis"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -50,7 +52,7 @@ func FetchOrCreateOfflineChatInfoTable(db *sql.DB) {
 	result.Close()
 }
 
-func SaveChatMessage(sender *User, reciever *User, datetime, body string, db *sql.DB) {
+func SaveChatMessage(sender *User, reciever *User, datetime string, body string, db *sql.DB) {
 	stmt, err := db.Prepare("INSERT INTO chatinfo (senderid, recieverid, datetime, body) VALUES (?, ?, ?, ?);")
 	if err != nil {
 		log.Println(err)
@@ -179,4 +181,70 @@ func DeleteOfflineMessage(reciever *User, sender *User, db *sql.DB) {
 	if err != nil {
 		log.Println(err)
 	}
+}
+
+func SaveUnreadMessage(sender *User, reciever *User, datetime string, body string, rc redis.Conn) {
+	rname := reciever.Username
+	sname := sender.Username
+
+	umkey := "Unread_" + sname + "_" + rname
+	encodebody := Base64Encode(body)
+	umvalue := datetime + "|" + encodebody
+	rc.Do("RPUSH", umkey, umvalue)
+
+	indexkey := "UnreadMsg_" + rname
+	indexfield := sname
+	rc.Do("HSETNX", indexkey, indexfield, umkey)
+
+}
+
+func GetAllUnreadMessageSender(user *User, db *sql.DB, rc redis.Conn) []*User {
+	uname := user.Username
+
+	indexkey := "UnreadMsg_" + uname
+	values, err := redis.Values(rc.Do("HKEYS", indexkey))
+
+	result := []*User{}
+	if err != nil {
+		log.Println(err)
+		return result
+	}
+
+	for _, v := range values {
+		sendername := string(v.([]byte))
+		sender := GetUserByName(sendername, db)
+		result = append(result, sender)
+	}
+	return result
+}
+
+func GetAllUnreadMessage(reciever *User, sender *User, rc redis.Conn) *list.List {
+	rname := reciever.Username
+	sname := sender.Username
+	result := list.New()
+
+	umkey := "Unread_" + sname + "_" + rname
+	indexkey := "UnreadMsg_" + rname
+	indexfield := sname
+
+	values, err := redis.Values(rc.Do("LRANGE", umkey, 0, -1))
+	if err != nil {
+		log.Println(err)
+		return result
+	}
+	for _, v := range values {
+		message := string(v.([]byte))
+		datetime := strings.Split(message, "|")[0]
+		encodebody := strings.Split(message, "|")[1]
+		tmp := new(ChatInfo)
+		tmp.Sender = sname
+		tmp.Reciever = rname
+		tmp.Time = datetime
+		tmp.Body = encodebody
+		result.PushBack(tmp)
+	}
+	rc.Do("DEL", umkey)
+	rc.Do("HDEL", indexkey, indexfield)
+
+	return result
 }

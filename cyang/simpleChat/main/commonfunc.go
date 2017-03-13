@@ -16,6 +16,7 @@ import (
 
 var (
 	recieverMutex *sync.Mutex = new(sync.Mutex)
+	chatMsg                   = make(chan string)
 )
 
 func checkError(err error, info string) (res bool) {
@@ -40,9 +41,8 @@ func StartClient(port string) {
 	defer conn.Close()
 
 	message := make(chan string)
-	chatMsg := make(chan string)
 
-	go ClientProcess(message, chatMsg, conn)
+	go ClientProcess(message, conn)
 
 	buf := make([]byte, 1024)
 	for {
@@ -64,7 +64,7 @@ func StartClient(port string) {
 	}
 }
 
-func ClientProcess(message chan string, chatMsg chan string, conn net.Conn) {
+func ClientProcess(message chan string, conn net.Conn) {
 	fmt.Printf("Welcome to Simple Chat!\n")
 	fmt.Printf("You can print:\n")
 	fmt.Printf("	1 to log in;\n")
@@ -91,7 +91,7 @@ func ClientProcess(message chan string, chatMsg chan string, conn net.Conn) {
 	chatReminder := make(map[string]*string)
 	chatReminder["currentTarget"] = new(string)
 	*chatReminder["currentTarget"] = ""
-	go RecieveChatInfo(chatMsg, chatReciever, chatReminder, conn)
+	go RecieveChatInfo(chatReciever, chatReminder, conn)
 	for {
 		fmt.Printf("Main Menu\n")
 		fmt.Printf("You can print:\n")
@@ -100,6 +100,7 @@ func ClientProcess(message chan string, chatMsg chan string, conn net.Conn) {
 		fmt.Printf("	3 to view pending friend applications;\n")
 		fmt.Printf("	4 to view history messages;\n")
 		fmt.Printf("	5 to exit;\n")
+		SendMessage("CUM", "", "", "", conn)
 
 		choice := ""
 		fmt.Scanln(&choice)
@@ -308,8 +309,9 @@ func Chat(message chan string, user *database.User, target *database.User, chatR
 	*chatReminder["currentTarget"] = target.Username
 	signal := make(map[string]*string)
 	signal["kill"] = new(string)
-	GetOfflineMessageFromTarget(message, user, target, conn)
+	GetUnreadMessageFromTarget(message, user, target, conn)
 	go GetChatInfoAndPrint(chatReciever, target, signal)
+	//go GetChatInfoAndPrint_(target, signal, conn)
 	for {
 		inputReader := bufio.NewReader(os.Stdin)
 		var chatbody string
@@ -320,6 +322,7 @@ func Chat(message chan string, user *database.User, target *database.User, chatR
 		if chatbody == "/back\n" {
 			*signal["kill"] = "1"
 			*chatReminder["currentTarget"] = ""
+			SendMessage("CD", "", "", "", conn)
 			return
 		}
 		if chatbody == "\n" {
@@ -416,7 +419,7 @@ func SendMessage(head string, str1 string, str2 string, str3 string, conn net.Co
 	}
 }
 
-func RecieveChatInfo(chatMsg chan string, chatReciever map[string]*list.List, chatReminder map[string]*string, conn net.Conn) {
+func RecieveChatInfo(chatReciever map[string]*list.List, chatReminder map[string]*string, conn net.Conn) {
 	for {
 		msg := <-chatMsg
 		recieverMutex.Lock()
@@ -427,10 +430,10 @@ func RecieveChatInfo(chatMsg chan string, chatReciever map[string]*list.List, ch
 			chatReciever[senderName] = list.New()
 		}
 		chatReciever[senderName].PushBack(msg)
-		if *chatReminder["currentTarget"] != senderName {
+		/*if *chatReminder["currentTarget"] != senderName {
 			curTime := GetCurrentTime()
 			fmt.Printf("[%s][System Message]: You recieve a message from %s. \n", curTime, senderName)
-		}
+		}*/
 		recieverMutex.Unlock()
 		//fmt.Printf("[LOG]Reading unlocked.")
 	}
@@ -464,17 +467,17 @@ func GetChatInfoAndPrint(chatReciever map[string]*list.List, sender *database.Us
 	}
 }
 
-func GetOfflineMessageFromTarget(message chan string, user *database.User, target *database.User, conn net.Conn) {
-	SendMessage("GOM", target.Username, "", "", conn)
+func GetUnreadMessageFromTarget(message chan string, user *database.User, target *database.User, conn net.Conn) {
+	SendMessage("GUM", target.Username, "", "", conn)
 	returnMsg := <-message
 
 	if strings.Split(returnMsg, "|")[0] == "FAIL" {
 		return
 	}
 
-	offlineMsgs := strings.Split(returnMsg, "|")[1:]
-	for i := 0; i < len(offlineMsgs); i++ {
-		splitInfos := strings.Split(offlineMsgs[i], ";")
+	unreadMsgs := strings.Split(returnMsg, "|")[1:]
+	for i := 0; i < len(unreadMsgs); i++ {
+		splitInfos := strings.Split(unreadMsgs[i], ";")
 		senderName := splitInfos[0]
 		curTime := splitInfos[1]
 		encodeBody := splitInfos[2]

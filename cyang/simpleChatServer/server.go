@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cyang/simpleChat/database"
+	"github.com/garyburd/redigo/redis"
 )
 
 func checkError(err error, info string) (res bool) {
@@ -23,7 +24,7 @@ func checkError(err error, info string) (res bool) {
 	return true
 }
 
-func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, db *sql.DB) {
+func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, chattingTarget map[string]string, db *sql.DB, rc redis.Conn) {
 	log.Println("connection is connected from ...", conn.RemoteAddr().String())
 
 	buf := make([]byte, 1024)
@@ -35,6 +36,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 			if user != nil {
 				database.SetStatusOff(user, db)
 				delete(ipnamemap, user.Username)
+				delete(chattingTarget, user.Username)
 			}
 			conn.Close()
 			break
@@ -58,19 +60,22 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 			}
 			database.SetStatusOn(user, db)
 			ipnamemap[user.Username] = conn.RemoteAddr().String()
+			chattingTarget[user.Username] = ""
 			log.Printf("Log in username: %s	userid: %d \n", user.Username, user.Id)
 			returnMsg := conn.RemoteAddr().String() + "|SUCCESS|" + strconv.Itoa(user.Id)
 
 			messages <- returnMsg
 
-			offlineMessageSenders := database.GetAllOfflineMessageSender(user, db)
+		case "CUM": //Process Check Unread Message message.
+			offlineMessageSenders := database.GetAllUnreadMessageSender(user, db, rc)
 
 			if len(offlineMessageSenders) != 0 {
-				systemMsg := conn.RemoteAddr().String() + "|SYSTEM|" + offlineMessageSenders[0].Username
+				systemMsg := offlineMessageSenders[0].Username
 				for i := 1; i < len(offlineMessageSenders); i++ {
 					systemMsg = systemMsg + ", " + offlineMessageSenders[i].Username
 				}
-				systemMsg = systemMsg + " sent you some offline messages. Please remember to check. \n"
+				systemMsg = conn.RemoteAddr().String() + "|SYSTEM|" + "You have some unread messages from " + systemMsg + ", Please remember to check. \n"
+				log.Printf(systemMsg)
 				messages <- systemMsg
 			}
 
@@ -85,6 +90,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 			user = AddUser(username, password, db)
 			database.SetStatusOn(user, db)
 			ipnamemap[user.Username] = conn.RemoteAddr().String()
+			chattingTarget[user.Username] = ""
 			log.Printf("Sign up username: %s	userid: %d \n", user.Username, user.Id)
 			returnMsg := conn.RemoteAddr().String() + "|SUCCESS|" + strconv.Itoa(user.Id)
 			messages <- returnMsg
@@ -119,6 +125,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 				returnMsg = returnMsg + "|" + strconv.Itoa(requestFriends[i].Id) + ";" + requestFriends[i].Username
 			}
 			messages <- returnMsg
+
 		case "CR": //Process Confirm Request message.
 			friendid, _ := strconv.Atoi(strings.Split(recieveStr, "|")[1])
 			friend := database.GetUserByID(friendid, db)
@@ -135,6 +142,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 				sendMsg := friendAddr + "|SYSTEM|" + user.Username + " has confirmed your friend request."
 				messages <- sendMsg
 			}
+
 		case "VFL": //Process View Friend List message.
 			friends := database.GetFriendList(user, db)
 			returnMsg := conn.RemoteAddr().String()
@@ -144,9 +152,11 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 				returnMsg = returnMsg + "|" + strconv.Itoa(friends[i].Id) + ";" + friends[i].Username + ";" + strconv.Itoa(status)
 			}
 			messages <- returnMsg
+
 		case "OD": //Process Open Dialog message.
 			targetid, _ := strconv.Atoi(strings.Split(recieveStr, "|")[1])
 			target := database.GetUserByID(targetid, db)
+			chattingTarget[user.Username] = target.Username
 
 			if database.CheckFriendRelationship(target, user, db) == false {
 				SendFailMessage(conn, head)
@@ -154,26 +164,30 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 			}
 			returnMsg := conn.RemoteAddr().String() + "|SUCCESS|" + target.Username
 			messages <- returnMsg
-		case "GOM": //Process Get Offline Message message.
+
+		case "CD": //Process Close Dialog message.
+			chattingTarget[user.Username] = ""
+
+		case "GUM": //Process Get Unread Message message.
 			targetName := strings.Split(recieveStr, "|")[1]
 			target := database.GetUserByName(targetName, db)
 
-			offlineMessageInfos := database.GetAllOfflineMessage(user, target, db)
+			unreadMessageInfos := database.GetAllUnreadMessage(user, target, rc)
 
-			if offlineMessageInfos.Len() == 0 {
+			if unreadMessageInfos.Len() == 0 {
 				SendFailMessage(conn, head)
 				continue
 			}
 			sendMsg := conn.RemoteAddr().String()
-			for i := 0; offlineMessageInfos.Len() > 0; i++ {
-				item := offlineMessageInfos.Front()
+			for i := 0; unreadMessageInfos.Len() > 0; i++ {
+				item := unreadMessageInfos.Front()
 				charInfo := item.Value.(*database.ChatInfo)
-				encodedBody := database.Base64Encode(charInfo.Body)
+				encodedBody := charInfo.Body
 				sendMsg = sendMsg + "|" + charInfo.Sender + ";" + charInfo.Time + ";" + encodedBody
-				offlineMessageInfos.Remove(item)
+				unreadMessageInfos.Remove(item)
 			}
-			database.DeleteOfflineMessage(user, target, db)
 			messages <- sendMsg
+
 		case "CT": //Process Chat message.
 			targetName := strings.Split(recieveStr, "|")[1]
 			chatBodyTmp := strings.Split(recieveStr, "|")[2:]
@@ -192,16 +206,23 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 
 			targetAddr := ipnamemap[target.Username]
 			database.SaveChatMessage(user, target, curTime, chatBody, db)
+			// database.SaveUnreadMessage(user, target, curTime, chatBody, rc)
 
-			if database.CheckStatus(target.Username, db) == false {
-				database.SaveOfflineChatMessage(user, target, curTime, chatBody, db)
+			if database.CheckStatus(target.Username, db) == false || chattingTarget[target.Username] != user.Username {
+				database.SaveUnreadMessage(user, target, curTime, chatBody, rc)
+				if database.CheckStatus(target.Username, db) == true {
+					returnMsg := targetAddr + "|SYSTEM|You recieve a message from " + user.Username + ". \n"
+					messages <- returnMsg
+				}
 				continue
 			}
 
 			if targetAddr != "" {
 				sendMsg := targetAddr + "|CHAT|" + user.Username + "|" + curTime + "|" + chatBody
+				log.Printf("Send Msg [" + sendMsg + "] from " + user.Username + " to " + target.Username + ". \n")
 				messages <- sendMsg
 			}
+
 		case "OHD": //Process Open History Dialog message.
 			targetid, _ := strconv.Atoi(strings.Split(recieveStr, "|")[1])
 			target := database.GetUserByID(targetid, db)
@@ -214,6 +235,7 @@ func Handler(conn net.Conn, messages chan string, ipnamemap map[string]string, d
 			messages <- returnMsg
 
 			historyChatMsgs = database.GetAllHistory(user, target, db)
+
 		case "VHM": //Process View History Message message.
 			if historyChatMsgs.Len() == 0 {
 				SendFailMessage(conn, head)
@@ -240,7 +262,7 @@ func echoHandler(conns *map[string]net.Conn, messages chan string) {
 
 	for {
 		msg := <-messages
-		//fmt.Println(msg)
+		fmt.Println(msg)
 
 		recieverAddr := strings.Split(msg, "|")[0]
 		conn := (*conns)[recieverAddr]
@@ -262,7 +284,7 @@ func SendFailMessage(conn net.Conn, head string) {
 	}
 }
 
-func StartServer(port string, db *sql.DB) {
+func StartServer(port string, db *sql.DB, rc redis.Conn) {
 	service := ":" + port //strconv.Itoa(port);
 	tcpAddr, err := net.ResolveTCPAddr("tcp4", service)
 	checkError(err, "ResolveTCPAddr")
@@ -271,6 +293,7 @@ func StartServer(port string, db *sql.DB) {
 	conns := make(map[string]net.Conn)
 	messages := make(chan string, 10)
 	ipnamemap := make(map[string]string)
+	chattingTarget := make(map[string]string)
 
 	go echoHandler(&conns, messages)
 
@@ -280,7 +303,7 @@ func StartServer(port string, db *sql.DB) {
 		checkError(err, "Accept")
 		log.Println("Accepting ...")
 		conns[conn.RemoteAddr().String()] = conn
-		go Handler(conn, messages, ipnamemap, db)
+		go Handler(conn, messages, ipnamemap, chattingTarget, db, rc)
 
 	}
 
@@ -288,6 +311,8 @@ func StartServer(port string, db *sql.DB) {
 
 func main() {
 	db := database.OpenDatabase()
+	rc := database.OpenRedis()
+	defer database.CloseRedis(rc)
 	defer database.CloseDatabase(db)
 	defer database.SetAllStatusOff(db)
 	database.FetchOrCreateUserTable(db)
@@ -298,19 +323,21 @@ func main() {
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
-	go SafeExit(c, db)
+	go SafeExit(c, db, rc)
 
-	StartServer("9090", db)
+	StartServer("9090", db, rc)
 }
 
 //Safe Exit.
-func SafeExit(c chan os.Signal, db *sql.DB) {
+func SafeExit(c chan os.Signal, db *sql.DB, rc redis.Conn) {
 	<-c
 	fmt.Printf("The server is going to close...\n")
 	database.SetAllStatusOff(db)
 	fmt.Printf("Set all users' status off...\n")
 	database.CloseDatabase(db)
 	fmt.Printf("Close the database...\n")
+	database.CloseRedis(rc)
+	fmt.Printf("Close the Redis...\n")
 	fmt.Printf("The server is safely closed.\n")
 	os.Exit(0)
 }

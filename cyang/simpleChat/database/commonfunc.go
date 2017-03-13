@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/garyburd/redigo/redis"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -21,6 +22,18 @@ func OpenDatabase() *sql.DB {
 
 func CloseDatabase(db *sql.DB) {
 	db.Close()
+}
+
+func OpenRedis() redis.Conn {
+	c, err := redis.Dial("tcp", "127.0.0.1:6379")
+	if err != nil {
+		log.Println(err)
+	}
+	return c
+}
+
+func CloseRedis(rc redis.Conn) {
+	rc.Close()
 }
 
 type User struct {
